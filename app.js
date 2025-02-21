@@ -3,8 +3,10 @@ const multer = require('multer');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { getDb } = require('./db');
+const { processVideo } = require('./videoProcessing');
 
 const app = express();
+app.use(express.json()); // Add this line for JSON body parsing
 
 // Configure multer for video upload
 const storage = multer.diskStorage({
@@ -83,6 +85,59 @@ app.post('/upload', upload.single('video'), async (req, res) => {
             require('fs').unlinkSync(req.file.path);
         }
         res.status(500).json({ error: 'Error processing video upload: ' + error.message });
+    }
+});
+
+// Video trimming endpoint
+app.post('/videos/:id/trim', async (req, res) => {
+    try {
+        const { trimStart, trimEnd } = req.body;
+        const videoId = parseInt(req.params.id);
+
+        // Validate parameters
+        if (!trimStart && !trimEnd) {
+            return res.status(400).json({ error: 'Invalid trim parameters. Provide either trimStart or trimEnd' });
+        }
+
+        if ((trimStart && trimStart < 0) || (trimEnd && trimEnd < 0)) {
+            return res.status(400).json({ error: 'Trim values must be positive numbers' });
+        }
+
+        // Get video from database
+        const db = getDb();
+        const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId);
+
+        if (!video) {
+            return res.status(404).json({ error: 'Video not found' });
+        }
+
+        // Process video
+        const { outputPath, duration } = await processVideo(video.filepath, {
+            trimStart,
+            trimEnd
+        });
+
+        // Save new video to database
+        const result = db.prepare(`
+            INSERT INTO videos (filename, filepath, size, duration)
+            VALUES (?, ?, ?, ?)
+        `).run(
+            path.basename(outputPath),
+            outputPath,
+            require('fs').statSync(outputPath).size,
+            duration
+        );
+
+        // Return new video details
+        res.json({
+            id: result.lastInsertRowid,
+            filename: path.basename(outputPath),
+            duration: duration,
+            size: require('fs').statSync(outputPath).size
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: 'Error processing video: ' + error.message });
     }
 });
 
